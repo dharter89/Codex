@@ -11,6 +11,11 @@ import re
 from openai import OpenAI
 from dotenv import load_dotenv
 import json
+import fitz  # PyMuPDF
+import base64
+from io import BytesIO
+import time
+import random
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +44,23 @@ coa_df.dropna(how='all', inplace=True)
 coa_df.columns = [col.strip() for col in coa_df.columns]
 coa_df = coa_df[['GL Account', 'Account Name', 'Sample Vendors']].dropna(subset=['GL Account', 'Sample Vendors'])
 
+def gpt_with_retry(client, **kwargs):
+    max_retries = 5
+    backoff = 1
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            if hasattr(e, 'status_code') and e.status_code == 429:
+                wait_time = backoff + random.uniform(0, 1)
+                print(f"Rate limit hit. Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+                backoff *= 2
+            else:
+                print("OpenAI error:", e)
+                break
+    return None
+
 def match_category(description, coa_df):
     if not isinstance(description, str):
         return None
@@ -56,7 +78,7 @@ def match_category(description, coa_df):
         Respond only with a JSON object like this:
         {{ "gl_account": "Your Suggested GL Account", "confidence": 0.95 }}
         """
-        response = client.chat.completions.create(
+        response = gpt_with_retry(client,
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful financial assistant."},
@@ -64,17 +86,17 @@ def match_category(description, coa_df):
             ],
             temperature=0
         )
-        result = json.loads(response.choices[0].message.content.strip())
-        gl_guess = result.get("gl_account")
-        confidence = result.get("confidence", 0)
-
-        if confidence >= 0.9:
-            c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
-                      (description_lower, gl_guess, datetime.now().strftime('%Y-%m-%d')))
-            conn.commit()
-            return gl_guess
+        if response:
+            result = json.loads(response.choices[0].message.content.strip())
+            gl_guess = result.get("gl_account")
+            confidence = result.get("confidence", 0)
+            if confidence >= 0.9:
+                c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
+                          (description_lower, gl_guess, datetime.now().strftime('%Y-%m-%d')))
+                conn.commit()
+                return gl_guess
     except Exception as e:
-        print("OpenAI error:", e)
+        print("OpenAI fallback error:", e)
 
     c.execute("SELECT gl_account FROM vendor_gl WHERE vendor = ?", (description_lower,))
     result = c.fetchone()
@@ -93,6 +115,31 @@ def match_category(description, coa_df):
                 return row['GL Account']
 
     return None
+
+def ai_ocr_from_image(image):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_base64 = base64.b64encode(buffered.getvalue()).decode()
+    try:
+        response = gpt_with_retry(client,
+            model="gpt-4-vision-preview",
+            messages=[
+                {"role": "system", "content": "You're a document extraction assistant. Extract readable transaction text."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract visible transactions from this bank statement image. Return as plain text."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                    ]
+                }
+            ],
+            max_tokens=1000
+        )
+        if response:
+            return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("AI OCR fallback error:", e)
+    return ""
 
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
 
@@ -114,98 +161,64 @@ if uploaded_file:
         transactions = []
         progress_bar = st.progress(0)
 
-        with pdfplumber.open(file_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                progress_bar.progress((i + 1) / len(pdf.pages))
-                text = page.extract_text()
-                if not text:
-                    img = page.to_image(resolution=300)
-                    image = img.original
-                    text = pytesseract.image_to_string(image)
-                if "intentionally left blank" in text.lower() or len(text.strip()) < 20:
-                    continue
+        doc = fitz.open(file_path)
+        for i, page in enumerate(doc):
+            progress_bar.progress((i + 1) / len(doc))
+            pix = page.get_pixmap(dpi=300)
+            img_path = os.path.join(tmpdir, f"page_{i}.png")
+            pix.save(img_path)
+            image = Image.open(img_path)
 
-                lines = [line.strip() for line in text.splitlines() if line.strip()]
+            text = pytesseract.image_to_string(image)
 
-                for j, line in enumerate(lines):
-                    date_match = re.match(r'(\d{2}/\d{2})\s+(Card Purchase|Online Transfer|Recurring Card Purchase|ATM Withdrawal)?', line)
-                    if date_match:
-                        full_line = line
-                        if j + 1 < len(lines):
-                            full_line += " " + lines[j + 1]
-                        match = re.match(r'(\d{2}/\d{2})[^\d]*(.*?)\s+([-+]?\$?\d+[,.]\d{2})', full_line)
-                        if match:
-                            date_raw, description, amount_str = match.groups()
-                            try:
-                                parsed_date = datetime.strptime(date_raw + "/2018", "%m/%d/%Y")
-                            except:
-                                continue
-                            amount_str = amount_str.replace("$", "").replace(",", "")
-                            try:
-                                amount = float(amount_str)
-                            except:
-                                amount = None
-                            category = match_category(description, coa_df)
-                            status = "Auto-Categorized" if category else "Uncategorized"
-                            reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
+            if not text or len(text.strip()) < 20:
+                text = ai_ocr_from_image(image)
 
-                            transactions.append({
-                                "Date": parsed_date.strftime("%Y-%m-%d"),
-                                "Description": description.strip(),
-                                "Amount": amount,
-                                "Vendor": description.strip(),
-                                "Category": category,
-                                "Status": status,
-                                "Reason": reason
-                            })
+            if not text or len(text.strip()) < 20:
+                try:
+                    with pdfplumber.open(file_path) as fallback_pdf:
+                        text = fallback_pdf.pages[i].extract_text()
+                except:
+                    text = ""
+
+            if not text or "intentionally left blank" in text.lower():
+                continue
+
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+            for j, line in enumerate(lines):
+                date_match = re.match(r'(\d{2}/\d{2})\s+', line)
+                if date_match:
+                    full_line = line
+                    if j + 1 < len(lines):
+                        full_line += " " + lines[j + 1]
+                    match = re.match(r'(\d{2}/\d{2})[^\d]*(.*?)\s+([-+]?\$?\d+[,.]\d{2})', full_line)
+                    if match:
+                        date_raw, description, amount_str = match.groups()
+                        try:
+                            parsed_date = datetime.strptime(date_raw + "/2018", "%m/%d/%Y")
+                        except:
+                            continue
+                        amount_str = amount_str.replace("$", "").replace(",", "")
+                        try:
+                            amount = float(amount_str)
+                        except:
+                            amount = None
+                        category = match_category(description, coa_df)
+                        status = "Auto-Categorized" if category else "Uncategorized"
+                        reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
+
+                        transactions.append({
+                            "Date": parsed_date.strftime("%Y-%m-%d"),
+                            "Description": description.strip(),
+                            "Amount": amount,
+                            "Vendor": description.strip(),
+                            "Category": category,
+                            "Status": status,
+                            "Reason": reason
+                        })
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
         st.subheader("🔍 Extracted Transactions")
         st.dataframe(df if not df.empty else "empty")
-
-        st.markdown("**🎓 Manual Review & Override**")
-        manual_gl_inputs = {}
-        manual_vendor_inputs = {}
-
-        for idx, row in df.iterrows():
-            current_cat = row['Category']
-            current_vendor = row['Vendor']
-            options = [""] + list(coa_df['GL Account'].unique())
-            default_index = options.index(current_cat) if current_cat in options else 0
-
-            st.markdown(f"**Transaction {idx + 1}:** {row['Description']} — *Amount: {row['Amount']}*")
-            col1, col2 = st.columns([2, 2])
-            with col1:
-                selected_vendor = st.text_input("🧾 Vendor", value=current_vendor, key=f"vendor_{idx}")
-            with col2:
-                selected_gl = st.selectbox("📘 GL Account", options=options, index=default_index, key=f"gl_{idx}")
-
-            manual_vendor_inputs[idx] = selected_vendor
-            manual_gl_inputs[idx] = selected_gl
-
-        if st.button("💾 Save Changes"):
-            for idx in df.index:
-                new_vendor = manual_vendor_inputs[idx].strip()
-                new_gl = manual_gl_inputs[idx].strip()
-
-                if new_vendor:
-                    df.at[idx, 'Vendor'] = new_vendor
-                if new_gl:
-                    df.at[idx, 'Category'] = new_gl
-                    df.at[idx, 'Status'] = "Manually Updated"
-                    df.at[idx, 'Reason'] = "Manual Override"
-                    c.execute("INSERT OR REPLACE INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE vendor = ?), 0) + 1)",
-                              (new_vendor.lower(), new_gl, datetime.now().strftime('%Y-%m-%d'), new_vendor.lower()))
-            conn.commit()
-            st.success("Manual changes saved.")
-
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="⬇️ Download CSV",
-            data=csv,
-            file_name='categorized_transactions.csv',
-            mime='text/csv'
-        )
-else:
-    st.info("Please upload a PDF bank statement to begin.")
