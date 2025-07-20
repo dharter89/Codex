@@ -7,3 +7,4 @@ pytesseract
 Pillow
 python-dateutil
 PyMuPDF
+openpyxl
