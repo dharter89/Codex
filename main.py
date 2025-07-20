@@ -238,12 +238,16 @@ if uploaded_file:
                 vendor = row["Vendor"].strip()
                 vendor_cleaned = vendor.lower()
                 gl = row["Category"]
+
+                cursor.execute("SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
+                result = cursor.fetchone()
+                usage_count = (result[0] if result else 0) + 1
+
                 cursor.execute("""
                     INSERT OR REPLACE INTO vendor_gl (
                         vendor, corrected_vendor, gl_account, last_used, usage_count
-                    ) VALUES (?, ?, ?, ?, 
-                        COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)
-                """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
+                    ) VALUES (?, ?, ?, ?, ?)
+                """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), usage_count))
                 conn.commit()
 
         st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
