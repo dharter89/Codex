@@ -6,5 +6,5 @@ pdfplumber
 pytesseract
 Pillow
 python-dateutil
-PyMuPDF
+pymupdf
 openpyxl
