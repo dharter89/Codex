@@ -5,7 +5,6 @@ import tempfile
 import os
 import pdfplumber
 from PIL import Image
-import pytesseract
 from datetime import datetime
 import re
 from openai import OpenAI
@@ -145,6 +144,14 @@ def ai_ocr_from_image(image):
         print("AI OCR fallback error:", e)
     return ""
 
+def extract_text_from_image(image):
+    try:
+        import pytesseract
+        return pytesseract.image_to_string(image)
+    except Exception as e:
+        print("Tesseract OCR failed, switching to GPT:", e)
+        return ai_ocr_from_image(image)
+
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
 
 with st.container():
@@ -173,10 +180,7 @@ if uploaded_file:
             pix.save(img_path)
             image = Image.open(img_path)
 
-            text = pytesseract.image_to_string(image)
-
-            if not text or len(text.strip()) < 20:
-                text = ai_ocr_from_image(image)
+            text = extract_text_from_image(image)
 
             if not text or len(text.strip()) < 20:
                 try:
