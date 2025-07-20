@@ -64,7 +64,7 @@ def clean_vendor(description):
     return vendor.strip()
 
 def match_category(vendor, coa_df):
-    vendor_lower = vendor.lower()
+    vendor_cleaned = str(vendor).strip().lower()
     try:
         prompt = f"""
         You are an accountant. Based on the chart of accounts, pick the best GL Account for vendor: {vendor}.
@@ -86,21 +86,22 @@ def match_category(vendor, coa_df):
             confidence = result.get("confidence", 0)
             if confidence >= 0.9:
                 c.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
-                          (vendor_lower, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
+                          (vendor_cleaned, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
                 return gl_guess
     except:
         pass
 
-    c.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor,))
+    c.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
     result = c.fetchone()
     if result:
-        c.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", (datetime.now().strftime('%Y-%m-%d'), vendor))
+        c.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", 
+                  (datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
         conn.commit()
         return result[0]
 
     for _, row in coa_df.iterrows():
-        if str(row['Sample Vendors']).lower() in vendor_lower:
+        if str(row['Sample Vendors']).lower() in vendor_cleaned:
             return row['GL Account']
 
     return None
