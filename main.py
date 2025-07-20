@@ -18,23 +18,25 @@ import random
 
 # Load environment variables
 load_dotenv()
-client = OpenAI()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize SQLite database for vendor GL mapping
+# Ensure database directory exists
 if not os.path.exists("database"):
     os.makedirs("database")
+
+# Initialize SQLite connection and cursor
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS vendor_gl (
-                vendor TEXT,
-                corrected_vendor TEXT,
-                gl_account TEXT,
-                last_used TEXT,
-                usage_count INTEGER
-            )''')
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS vendor_gl (
+                    vendor TEXT,
+                    corrected_vendor TEXT,
+                    gl_account TEXT,
+                    last_used TEXT,
+                    usage_count INTEGER
+                )''')
 conn.commit()
 
-# Load pre-defined Chart of Accounts from Excel file
+# Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
 if not os.path.exists(COA_PATH):
     st.error("Chart of Accounts file is missing. Please place 'FirmCOAv1.xlsx' in the 'data' folder.")
@@ -63,7 +65,7 @@ def clean_vendor(description):
     vendor = re.sub(r"\b(card|transaction|\d{4,})\b", "", description, flags=re.IGNORECASE)
     return vendor.strip()
 
-def match_category(vendor, coa_df):
+def match_category(vendor, coa_df, cursor):
     vendor_cleaned = str(vendor).strip().lower()
     try:
         prompt = f"""
@@ -85,23 +87,24 @@ def match_category(vendor, coa_df):
             gl_guess = result.get("gl_account")
             confidence = result.get("confidence", 0)
             if confidence >= 0.9:
-                c.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
-                          (vendor_cleaned, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
+                cursor.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
+                              (vendor_cleaned, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
                 return gl_guess
-    except:
-        pass
+    except Exception as e:
+        print("GPT match failed:", e)
 
-    c.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
-    result = c.fetchone()
+    cursor.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
+    result = cursor.fetchone()
     if result:
-        c.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", 
-                  (datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
+        cursor.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", 
+                      (datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
         conn.commit()
         return result[0]
 
     for _, row in coa_df.iterrows():
-        if str(row['Sample Vendors']).lower() in vendor_cleaned:
+        sample_vendors = str(row['Sample Vendors']).lower().split(',')
+        if any(sample.strip() in vendor_cleaned for sample in sample_vendors):
             return row['GL Account']
 
     return None
@@ -188,7 +191,7 @@ if uploaded_file:
                     if match:
                         date_raw, description, amount_str = match.groups()
                         try:
-                            parsed_date = datetime.strptime(date_raw + "/2018", "%m/%d/%Y")
+                            parsed_date = datetime.strptime(date_raw + f"/{datetime.now().year}", "%m/%d/%Y")
                         except:
                             continue
                         amount_str = amount_str.replace("$", "").replace(",", "")
@@ -197,7 +200,7 @@ if uploaded_file:
                         except:
                             amount = None
                         vendor = clean_vendor(description)
-                        category = match_category(vendor, coa_df)
+                        category = match_category(vendor, coa_df, cursor)
                         status = "Auto-Categorized" if category else "Uncategorized"
                         reason = "Matched" if category else "Needs Review"
 
@@ -220,8 +223,8 @@ if uploaded_file:
             if row["Vendor"] and row["Category"]:
                 vendor = row["Vendor"].strip()
                 gl = row["Category"]
-                c.execute("INSERT OR REPLACE INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)",
-                          (vendor.lower(), vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor))
+                cursor.execute("INSERT OR REPLACE INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)",
+                              (vendor.lower(), vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor))
                 conn.commit()
 
         st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
