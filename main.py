@@ -35,15 +35,13 @@ if not os.path.exists(COA_PATH):
     st.error("Chart of Accounts file is missing. Please place 'FirmCOAv1.xlsx' in the 'data' folder.")
     st.stop()
 coa_df = pd.read_excel(COA_PATH)
-coa_df.dropna(how='all', inplace=True)  # Drop empty rows
+coa_df.dropna(how='all', inplace=True)
 coa_df.columns = [col.strip() for col in coa_df.columns]
 coa_df = coa_df[['GL Account', 'Account Name', 'Sample Vendors']].dropna(subset=['GL Account', 'Sample Vendors'])
 
-# Matching function to categorize transactions
 def match_category(description, coa_df):
     if not isinstance(description, str):
         return None
-
     description_lower = description.lower()
 
     try:
@@ -96,7 +94,6 @@ def match_category(description, coa_df):
 
     return None
 
-# Streamlit App
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
 
 with st.container():
@@ -168,24 +165,38 @@ if uploaded_file:
         st.dataframe(df if not df.empty else "empty")
 
         st.markdown("**🎓 Manual Review & Override**")
-        manual_inputs = {}
+        manual_gl_inputs = {}
+        manual_vendor_inputs = {}
+
         for idx, row in df.iterrows():
             current_cat = row['Category']
-            vendor = row['Vendor']
+            current_vendor = row['Vendor']
             options = [""] + list(coa_df['GL Account'].unique())
             default_index = options.index(current_cat) if current_cat in options else 0
-            selected_gl = st.selectbox(f"{vendor} ({row['Description']})", options=options, index=default_index, key=f"manual_{idx}")
-            manual_inputs[idx] = selected_gl
+
+            st.markdown(f"**Transaction {idx + 1}:** {row['Description']} — *Amount: {row['Amount']}*")
+            col1, col2 = st.columns([2, 2])
+            with col1:
+                selected_vendor = st.text_input("🧾 Vendor", value=current_vendor, key=f"vendor_{idx}")
+            with col2:
+                selected_gl = st.selectbox("📘 GL Account", options=options, index=default_index, key=f"gl_{idx}")
+
+            manual_vendor_inputs[idx] = selected_vendor
+            manual_gl_inputs[idx] = selected_gl
 
         if st.button("💾 Save Changes"):
-            for idx, new_gl in manual_inputs.items():
+            for idx in df.index:
+                new_vendor = manual_vendor_inputs[idx].strip()
+                new_gl = manual_gl_inputs[idx].strip()
+
+                if new_vendor:
+                    df.at[idx, 'Vendor'] = new_vendor
                 if new_gl:
                     df.at[idx, 'Category'] = new_gl
                     df.at[idx, 'Status'] = "Manually Updated"
                     df.at[idx, 'Reason'] = "Manual Override"
-                    vendor_lower = df.at[idx, 'Vendor'].lower()
                     c.execute("INSERT OR REPLACE INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE vendor = ?), 0) + 1)",
-                              (vendor_lower, new_gl, datetime.now().strftime('%Y-%m-%d'), vendor_lower))
+                              (new_vendor.lower(), new_gl, datetime.now().strftime('%Y-%m-%d'), new_vendor.lower()))
             conn.commit()
             st.success("Manual changes saved.")
 
