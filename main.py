@@ -8,6 +8,13 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from datetime import datetime
 import re
+from openai import OpenAI
+from dotenv import load_dotenv
+import json
+
+# Load environment variables
+load_dotenv()
+client = OpenAI()
 
 # Initialize SQLite database for vendor GL mapping
 if not os.path.exists("database"):
@@ -39,7 +46,40 @@ def match_category(description, coa_df):
 
     description_lower = description.lower()
 
-    # First, check the vendor memory DB
+    # Always try GPT first
+    try:
+        prompt = f"""
+        You are an accountant. Based on the following chart of accounts, choose the best GL Account for the transaction.
+
+        Transaction Description: {description}
+
+        Chart of Accounts:
+        {coa_df[['GL Account', 'Account Name']].to_string(index=False)}
+
+        Respond only with a JSON object like this:
+        {{ "gl_account": "Your Suggested GL Account", "confidence": 0.95 }}
+        """
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful financial assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        gl_guess = result.get("gl_account")
+        confidence = result.get("confidence", 0)
+
+        if confidence >= 0.9:
+            c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
+                      (description_lower, gl_guess, datetime.now().strftime('%Y-%m-%d')))
+            conn.commit()
+            return gl_guess
+    except Exception as e:
+        print("OpenAI error:", e)
+
+    # Then, check the vendor memory DB
     c.execute("SELECT gl_account FROM vendor_gl WHERE vendor = ?", (description_lower,))
     result = c.fetchone()
     if result:
@@ -47,12 +87,11 @@ def match_category(description, coa_df):
         conn.commit()
         return result[0]
 
-    # Then, check COA for sample vendor match
+    # Finally, check COA for sample vendor match
     for _, row in coa_df.iterrows():
         sample_vendors = str(row['Sample Vendors']).lower().split(',')
         for vendor in sample_vendors:
             if vendor.strip() in description_lower:
-                # Save to memory for future auto-categorization
                 c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
                           (description_lower, row['GL Account'], datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
@@ -78,8 +117,10 @@ if uploaded_file:
     with tempfile.TemporaryDirectory() as tmpdir:
         images = convert_from_bytes(uploaded_file.read(), fmt='jpeg')
         transactions = []
+        progress_bar = st.progress(0)
 
         for i, image in enumerate(images):
+            progress_bar.progress((i + 1) / len(images))
             text = pytesseract.image_to_string(image)
             if "intentionally left blank" in text.lower() or len(text.strip()) < 20:
                 continue
@@ -106,7 +147,7 @@ if uploaded_file:
                             amount = None
                         category = match_category(description, coa_df)
                         status = "Auto-Categorized" if category else "Uncategorized"
-                        reason = "Matched from Memory/COA" if category else "Manual Categorization Skip"
+                        reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
 
                         transactions.append({
                             "Date": parsed_date.strftime("%Y-%m-%d"),
@@ -118,25 +159,33 @@ if uploaded_file:
                             "Reason": reason
                         })
 
+        progress_bar.empty()
         df = pd.DataFrame(transactions)
         st.subheader("🔍 Extracted Transactions")
         st.dataframe(df if not df.empty else "empty")
 
         # Manual Categorization UI
-        uncategorized_vendors = df[df['Category'].isna()]['Vendor'].unique()
-        if len(uncategorized_vendors) > 0:
-            st.markdown("**🎓 Manual Categorization**")
-            manual_inputs = {}
-            for vendor in uncategorized_vendors:
-                gl_account = st.selectbox(f"Assign GL Account to: {vendor}", options=coa_df['GL Account'].unique(), key=vendor)
-                manual_inputs[vendor] = gl_account
+        st.markdown("**🎓 Manual Review & Override**")
+        manual_inputs = {}
+        for idx, row in df.iterrows():
+            current_cat = row['Category']
+            vendor = row['Vendor']
+            options = [""] + list(coa_df['GL Account'].unique())
+            default_index = options.index(current_cat) if current_cat in options else 0
+            selected_gl = st.selectbox(f"{vendor} ({row['Description']})", options=options, index=default_index, key=f"manual_{idx}")
+            manual_inputs[idx] = selected_gl
 
-            if st.button("Save Manual Mappings"):
-                for vendor, gl in manual_inputs.items():
+        if st.button("💾 Save Changes"):
+            for idx, new_gl in manual_inputs.items():
+                if new_gl:
+                    df.at[idx, 'Category'] = new_gl
+                    df.at[idx, 'Status'] = "Manually Updated"
+                    df.at[idx, 'Reason'] = "Manual Override"
+                    vendor_lower = df.at[idx, 'Vendor'].lower()
                     c.execute("INSERT OR REPLACE INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE vendor = ?), 0) + 1)",
-                              (vendor.lower(), gl, datetime.now().strftime('%Y-%m-%d'), vendor.lower()))
-                conn.commit()
-                st.success("Manual mappings saved. Please re-upload the PDF to refresh categorization.")
+                              (vendor_lower, new_gl, datetime.now().strftime('%Y-%m-%d'), vendor_lower))
+            conn.commit()
+            st.success("Manual changes saved.")
 
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
