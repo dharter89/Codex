@@ -28,6 +28,7 @@ conn = sqlite3.connect("database/vendor_gl.db")
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS vendor_gl (
                 vendor TEXT,
+                corrected_vendor TEXT,
                 gl_account TEXT,
                 last_used TEXT,
                 usage_count INTEGER
@@ -61,16 +62,19 @@ def gpt_with_retry(client, **kwargs):
                 break
     return None
 
-def match_category(description, coa_df):
-    if not isinstance(description, str):
-        return None
-    description_lower = description.lower()
+def clean_vendor(description):
+    description = re.sub(r"^\d{2}/\d{2}\s+", "", description)  # remove date prefix
+    vendor = re.sub(r"\b(card|transaction|\d{4,})\b", "", description, flags=re.IGNORECASE)
+    return vendor.strip()
+
+def match_category(vendor, coa_df):
+    vendor_lower = vendor.lower()
 
     try:
         prompt = f"""
-        You are an accountant. Based on the following chart of accounts, choose the best GL Account for the transaction.
+        You are an accountant. Based on the following chart of accounts, choose the best GL Account for this vendor:
 
-        Transaction Description: {description}
+        Vendor: {vendor}
 
         Chart of Accounts:
         {coa_df[['GL Account', 'Account Name']].to_string(index=False)}
@@ -91,26 +95,26 @@ def match_category(description, coa_df):
             gl_guess = result.get("gl_account")
             confidence = result.get("confidence", 0)
             if confidence >= 0.9:
-                c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
-                          (description_lower, gl_guess, datetime.now().strftime('%Y-%m-%d')))
+                c.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
+                          (vendor_lower, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
                 return gl_guess
     except Exception as e:
         print("OpenAI fallback error:", e)
 
-    c.execute("SELECT gl_account FROM vendor_gl WHERE vendor = ?", (description_lower,))
+    c.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor,))
     result = c.fetchone()
     if result:
-        c.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE vendor = ?", (datetime.now().strftime('%Y-%m-%d'), description_lower))
+        c.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", (datetime.now().strftime('%Y-%m-%d'), vendor))
         conn.commit()
         return result[0]
 
     for _, row in coa_df.iterrows():
         sample_vendors = str(row['Sample Vendors']).lower().split(',')
-        for vendor in sample_vendors:
-            if vendor.strip() in description_lower:
-                c.execute("INSERT INTO vendor_gl (vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, 1)",
-                          (description_lower, row['GL Account'], datetime.now().strftime('%Y-%m-%d')))
+        for v in sample_vendors:
+            if v.strip() in vendor_lower:
+                c.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
+                          (vendor_lower, vendor, row['GL Account'], datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
                 return row['GL Account']
 
@@ -204,7 +208,8 @@ if uploaded_file:
                             amount = float(amount_str)
                         except:
                             amount = None
-                        category = match_category(description, coa_df)
+                        vendor = clean_vendor(description)
+                        category = match_category(vendor, coa_df)
                         status = "Auto-Categorized" if category else "Uncategorized"
                         reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
 
@@ -212,7 +217,7 @@ if uploaded_file:
                             "Date": parsed_date.strftime("%Y-%m-%d"),
                             "Description": description.strip(),
                             "Amount": amount,
-                            "Vendor": description.strip(),
+                            "Vendor": vendor,
                             "Category": category,
                             "Status": status,
                             "Reason": reason
@@ -220,5 +225,17 @@ if uploaded_file:
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
+
         st.subheader("🔍 Extracted Transactions")
-        st.dataframe(df if not df.empty else "empty")
+        edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+
+        # Save vendor corrections for future matches
+        for _, row in edited_df.iterrows():
+            if row["Vendor"] and row["Category"]:
+                vendor = row["Vendor"].strip()
+                gl = row["Category"]
+                c.execute("INSERT OR REPLACE INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)",
+                          (vendor.lower(), vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor))
+                conn.commit()
+
+        st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
