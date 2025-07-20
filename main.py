@@ -21,8 +21,7 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Ensure database directory exists
-if not os.path.exists("database"):
-    os.makedirs("database")
+os.makedirs("database", exist_ok=True)
 
 # Initialize SQLite connection and cursor
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
@@ -57,6 +56,7 @@ def gpt_with_retry(client, **kwargs):
                 time.sleep(backoff)
                 backoff *= 2
             else:
+                print("GPT call failed:", e)
                 break
     return None
 
@@ -66,7 +66,19 @@ def clean_vendor(description):
     return vendor.strip()
 
 def match_category(vendor, coa_df, cursor):
-    vendor_cleaned = str(vendor).strip().lower()
+    vendor_cleaned = str(vendor or "").strip().lower()
+
+    try:
+        cursor.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
+        result = cursor.fetchone()
+        if result:
+            cursor.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?",
+                           (datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
+            conn.commit()
+            return result[0]
+    except Exception as e:
+        print("[ERROR] DB read failed:", e)
+
     try:
         prompt = f"""
         You are an accountant. Based on the chart of accounts, pick the best GL Account for vendor: {vendor}.
@@ -92,15 +104,7 @@ def match_category(vendor, coa_df, cursor):
                 conn.commit()
                 return gl_guess
     except Exception as e:
-        print("GPT match failed:", e)
-
-    cursor.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
-    result = cursor.fetchone()
-    if result:
-        cursor.execute("UPDATE vendor_gl SET usage_count = usage_count + 1, last_used = ? WHERE corrected_vendor = ?", 
-                      (datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
-        conn.commit()
-        return result[0]
+        print("[ERROR] GPT match failed:", e)
 
     for _, row in coa_df.iterrows():
         sample_vendors = str(row['Sample Vendors']).lower().split(',')
@@ -130,14 +134,16 @@ def ai_ocr_from_image(image):
         )
         if response:
             return response.choices[0].message.content.strip()
-    except:
+    except Exception as e:
+        print("[ERROR] Vision OCR failed:", e)
         return ""
 
 def extract_text_from_image(image):
     try:
         import pytesseract
         return pytesseract.image_to_string(image)
-    except:
+    except Exception as e:
+        print("[WARNING] pytesseract failed, using GPT vision:", e)
         return ai_ocr_from_image(image)
 
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
@@ -149,7 +155,7 @@ with st.container():
     st.markdown("Upload PDF statements to categorize transactions.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("📄 Upload Bank Statement (PDF)", type=["pdf"])
+uploaded_file = st.file_uploader("\U0001F4C4 Upload Bank Statement (PDF)", type=["pdf"])
 
 if uploaded_file:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -216,7 +222,7 @@ if uploaded_file:
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
-        st.subheader("🔍 Extracted Transactions")
+        st.subheader("\U0001F50D Extracted Transactions")
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
         for _, row in edited_df.iterrows():
