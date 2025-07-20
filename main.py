@@ -23,7 +23,7 @@ client = OpenAI()
 # Initialize SQLite database for vendor GL mapping
 if not os.path.exists("database"):
     os.makedirs("database")
-conn = sqlite3.connect("database/vendor_gl.db")
+conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS vendor_gl (
                 vendor TEXT,
@@ -52,34 +52,25 @@ def gpt_with_retry(client, **kwargs):
             return client.chat.completions.create(**kwargs)
         except Exception as e:
             if hasattr(e, 'status_code') and e.status_code == 429:
-                wait_time = backoff + random.uniform(0, 1)
-                print(f"Rate limit hit. Retrying in {wait_time:.2f} seconds...")
-                time.sleep(wait_time)
+                time.sleep(backoff)
                 backoff *= 2
             else:
-                print("OpenAI error:", e)
                 break
     return None
 
 def clean_vendor(description):
-    description = re.sub(r"^\d{2}/\d{2}\s+", "", description)  # remove date prefix
+    description = re.sub(r"^\d{2}/\d{2}\s+", "", description)
     vendor = re.sub(r"\b(card|transaction|\d{4,})\b", "", description, flags=re.IGNORECASE)
     return vendor.strip()
 
 def match_category(vendor, coa_df):
     vendor_lower = vendor.lower()
-
     try:
         prompt = f"""
-        You are an accountant. Based on the following chart of accounts, choose the best GL Account for this vendor:
-
-        Vendor: {vendor}
-
-        Chart of Accounts:
+        You are an accountant. Based on the chart of accounts, pick the best GL Account for vendor: {vendor}.
+        Chart:
         {coa_df[['GL Account', 'Account Name']].to_string(index=False)}
-
-        Respond only with a JSON object like this:
-        {{ "gl_account": "Your Suggested GL Account", "confidence": 0.95 }}
+        Reply with JSON: {{"gl_account": "...", "confidence": 0.95}}
         """
         response = gpt_with_retry(client,
             model="gpt-3.5-turbo",
@@ -98,8 +89,8 @@ def match_category(vendor, coa_df):
                           (vendor_lower, vendor, gl_guess, datetime.now().strftime('%Y-%m-%d')))
                 conn.commit()
                 return gl_guess
-    except Exception as e:
-        print("OpenAI fallback error:", e)
+    except:
+        pass
 
     c.execute("SELECT gl_account FROM vendor_gl WHERE corrected_vendor = ?", (vendor,))
     result = c.fetchone()
@@ -109,13 +100,8 @@ def match_category(vendor, coa_df):
         return result[0]
 
     for _, row in coa_df.iterrows():
-        sample_vendors = str(row['Sample Vendors']).lower().split(',')
-        for v in sample_vendors:
-            if v.strip() in vendor_lower:
-                c.execute("INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, 1)",
-                          (vendor_lower, vendor, row['GL Account'], datetime.now().strftime('%Y-%m-%d')))
-                conn.commit()
-                return row['GL Account']
+        if str(row['Sample Vendors']).lower() in vendor_lower:
+            return row['GL Account']
 
     return None
 
@@ -127,11 +113,11 @@ def ai_ocr_from_image(image):
         response = gpt_with_retry(client,
             model="gpt-4-vision-preview",
             messages=[
-                {"role": "system", "content": "You're a document extraction assistant. Extract readable transaction text."},
+                {"role": "system", "content": "You're a document assistant. Extract visible transactions from this image."},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract visible transactions from this bank statement image. Return as plain text."},
+                        {"type": "text", "text": "Extract transactions"},
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                     ]
                 }
@@ -140,16 +126,14 @@ def ai_ocr_from_image(image):
         )
         if response:
             return response.choices[0].message.content.strip()
-    except Exception as e:
-        print("AI OCR fallback error:", e)
-    return ""
+    except:
+        return ""
 
 def extract_text_from_image(image):
     try:
         import pytesseract
         return pytesseract.image_to_string(image)
-    except Exception as e:
-        print("Tesseract OCR failed, switching to GPT:", e)
+    except:
         return ai_ocr_from_image(image)
 
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
@@ -158,7 +142,7 @@ with st.container():
     st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
     st.image("data/ValiantIconWhite.png", width=250)
     st.title("Bank Statement Categorizer")
-    st.markdown("Upload PDF bank statements and categorize transactions using your firm’s Chart of Accounts.")
+    st.markdown("Upload PDF statements to categorize transactions.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("📄 Upload Bank Statement (PDF)", type=["pdf"])
@@ -181,7 +165,6 @@ if uploaded_file:
             image = Image.open(img_path)
 
             text = extract_text_from_image(image)
-
             if not text or len(text.strip()) < 20:
                 try:
                     with pdfplumber.open(file_path) as fallback_pdf:
@@ -215,7 +198,7 @@ if uploaded_file:
                         vendor = clean_vendor(description)
                         category = match_category(vendor, coa_df)
                         status = "Auto-Categorized" if category else "Uncategorized"
-                        reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
+                        reason = "Matched" if category else "Needs Review"
 
                         transactions.append({
                             "Date": parsed_date.strftime("%Y-%m-%d"),
@@ -229,11 +212,9 @@ if uploaded_file:
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
-
         st.subheader("🔍 Extracted Transactions")
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
-        # Save vendor corrections for future matches
         for _, row in edited_df.iterrows():
             if row["Vendor"] and row["Category"]:
                 vendor = row["Vendor"].strip()
