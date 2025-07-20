@@ -26,14 +26,22 @@ os.makedirs("database", exist_ok=True)
 # Initialize SQLite connection and cursor
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS vendor_gl (
-                    vendor TEXT,
-                    corrected_vendor TEXT,
-                    gl_account TEXT,
-                    last_used TEXT,
-                    usage_count INTEGER
-                )''')
-conn.commit()
+
+# Recreate vendor_gl table if corrupted or missing
+try:
+    cursor.execute("SELECT 1 FROM vendor_gl LIMIT 1")
+except sqlite3.OperationalError:
+    cursor.execute("DROP TABLE IF EXISTS vendor_gl")
+    cursor.execute('''
+        CREATE TABLE vendor_gl (
+            vendor TEXT,
+            corrected_vendor TEXT,
+            gl_account TEXT,
+            last_used TEXT,
+            usage_count INTEGER
+        )
+    ''')
+    conn.commit()
 
 # Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
@@ -228,9 +236,14 @@ if uploaded_file:
         for _, row in edited_df.iterrows():
             if row["Vendor"] and row["Category"]:
                 vendor = row["Vendor"].strip()
+                vendor_cleaned = vendor.lower()
                 gl = row["Category"]
-                cursor.execute("INSERT OR REPLACE INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count) VALUES (?, ?, ?, ?, COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)",
-                              (vendor.lower(), vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor))
+                cursor.execute("""
+                    INSERT OR REPLACE INTO vendor_gl (
+                        vendor, corrected_vendor, gl_account, last_used, usage_count
+                    ) VALUES (?, ?, ?, ?, 
+                        COALESCE((SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?), 0) + 1)
+                """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), vendor_cleaned))
                 conn.commit()
 
         st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
