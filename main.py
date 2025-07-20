@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 import os
 from PIL import Image
-from pdf2image import convert_from_bytes
+import fitz  # PyMuPDF
 import pytesseract
 from datetime import datetime
 import re
@@ -46,7 +46,6 @@ def match_category(description, coa_df):
 
     description_lower = description.lower()
 
-    # Always try GPT first
     try:
         prompt = f"""
         You are an accountant. Based on the following chart of accounts, choose the best GL Account for the transaction.
@@ -79,7 +78,6 @@ def match_category(description, coa_df):
     except Exception as e:
         print("OpenAI error:", e)
 
-    # Then, check the vendor memory DB
     c.execute("SELECT gl_account FROM vendor_gl WHERE vendor = ?", (description_lower,))
     result = c.fetchone()
     if result:
@@ -87,7 +85,6 @@ def match_category(description, coa_df):
         conn.commit()
         return result[0]
 
-    # Finally, check COA for sample vendor match
     for _, row in coa_df.iterrows():
         sample_vendors = str(row['Sample Vendors']).lower().split(',')
         for vendor in sample_vendors:
@@ -102,7 +99,6 @@ def match_category(description, coa_df):
 # Streamlit App
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
 
-# Centered header with logo
 with st.container():
     st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
     st.image("data/ValiantIconWhite.png", width=250)
@@ -110,17 +106,22 @@ with st.container():
     st.markdown("Upload PDF bank statements and categorize transactions using your firm’s Chart of Accounts.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# File Upload
 uploaded_file = st.file_uploader("📄 Upload Bank Statement (PDF)", type=["pdf"])
 
 if uploaded_file:
     with tempfile.TemporaryDirectory() as tmpdir:
-        images = convert_from_bytes(uploaded_file.read(), fmt='jpeg')
+        file_path = os.path.join(tmpdir, "temp.pdf")
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.read())
+
+        doc = fitz.open(file_path)
         transactions = []
         progress_bar = st.progress(0)
 
-        for i, image in enumerate(images):
-            progress_bar.progress((i + 1) / len(images))
+        for i, page in enumerate(doc):
+            progress_bar.progress((i + 1) / len(doc))
+            pix = page.get_pixmap()
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             text = pytesseract.image_to_string(image)
             if "intentionally left blank" in text.lower() or len(text.strip()) < 20:
                 continue
@@ -164,7 +165,6 @@ if uploaded_file:
         st.subheader("🔍 Extracted Transactions")
         st.dataframe(df if not df.empty else "empty")
 
-        # Manual Categorization UI
         st.markdown("**🎓 Manual Review & Override**")
         manual_inputs = {}
         for idx, row in df.iterrows():
