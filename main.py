@@ -3,8 +3,8 @@ import pandas as pd
 import sqlite3
 import tempfile
 import os
+import pdfplumber
 from PIL import Image
-import fitz  # PyMuPDF
 import pytesseract
 from datetime import datetime
 import re
@@ -114,51 +114,53 @@ if uploaded_file:
         with open(file_path, "wb") as f:
             f.write(uploaded_file.read())
 
-        doc = fitz.open(file_path)
         transactions = []
         progress_bar = st.progress(0)
 
-        for i, page in enumerate(doc):
-            progress_bar.progress((i + 1) / len(doc))
-            pix = page.get_pixmap()
-            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            text = pytesseract.image_to_string(image)
-            if "intentionally left blank" in text.lower() or len(text.strip()) < 20:
-                continue
+        with pdfplumber.open(file_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                progress_bar.progress((i + 1) / len(pdf.pages))
+                text = page.extract_text()
+                if not text:
+                    img = page.to_image(resolution=300)
+                    image = img.original
+                    text = pytesseract.image_to_string(image)
+                if "intentionally left blank" in text.lower() or len(text.strip()) < 20:
+                    continue
 
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-            for j, line in enumerate(lines):
-                date_match = re.match(r'(\d{2}/\d{2})\s+(Card Purchase|Online Transfer|Recurring Card Purchase|ATM Withdrawal)?', line)
-                if date_match:
-                    full_line = line
-                    if j + 1 < len(lines):
-                        full_line += " " + lines[j + 1]
-                    match = re.match(r'(\d{2}/\d{2})[^\d]*(.*?)\s+([-+]?\$?\d+[,.]\d{2})', full_line)
-                    if match:
-                        date_raw, description, amount_str = match.groups()
-                        try:
-                            parsed_date = datetime.strptime(date_raw + "/2018", "%m/%d/%Y")
-                        except:
-                            continue
-                        amount_str = amount_str.replace("$", "").replace(",", "")
-                        try:
-                            amount = float(amount_str)
-                        except:
-                            amount = None
-                        category = match_category(description, coa_df)
-                        status = "Auto-Categorized" if category else "Uncategorized"
-                        reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
+                for j, line in enumerate(lines):
+                    date_match = re.match(r'(\d{2}/\d{2})\s+(Card Purchase|Online Transfer|Recurring Card Purchase|ATM Withdrawal)?', line)
+                    if date_match:
+                        full_line = line
+                        if j + 1 < len(lines):
+                            full_line += " " + lines[j + 1]
+                        match = re.match(r'(\d{2}/\d{2})[^\d]*(.*?)\s+([-+]?\$?\d+[,.]\d{2})', full_line)
+                        if match:
+                            date_raw, description, amount_str = match.groups()
+                            try:
+                                parsed_date = datetime.strptime(date_raw + "/2018", "%m/%d/%Y")
+                            except:
+                                continue
+                            amount_str = amount_str.replace("$", "").replace(",", "")
+                            try:
+                                amount = float(amount_str)
+                            except:
+                                amount = None
+                            category = match_category(description, coa_df)
+                            status = "Auto-Categorized" if category else "Uncategorized"
+                            reason = "Matched from GPT / Memory / COA" if category else "Manual Categorization Skip"
 
-                        transactions.append({
-                            "Date": parsed_date.strftime("%Y-%m-%d"),
-                            "Description": description.strip(),
-                            "Amount": amount,
-                            "Vendor": description.strip(),
-                            "Category": category,
-                            "Status": status,
-                            "Reason": reason
-                        })
+                            transactions.append({
+                                "Date": parsed_date.strftime("%Y-%m-%d"),
+                                "Description": description.strip(),
+                                "Amount": amount,
+                                "Vendor": description.strip(),
+                                "Category": category,
+                                "Status": status,
+                                "Reason": reason
+                            })
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
