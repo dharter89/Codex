@@ -36,14 +36,9 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# Force creation by inserting a dummy row if table is empty
-cursor.execute("SELECT COUNT(*) FROM vendor_gl")
-if cursor.fetchone()[0] == 0:
-    cursor.execute("""
-        INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count)
-        VALUES ('demo', 'Demo Vendor', '1000', ?, 1)
-    """, (datetime.now().strftime('%Y-%m-%d'),))
-    conn.commit()
+# Debug output to confirm path and DB existence
+st.write("📂 Working directory:", os.getcwd())
+st.write("📄 DB exists:", os.path.exists("database/vendor_gl.db"))
 
 # Load COA
 COA_PATH = "data/FirmCOAv1.xlsx"
@@ -217,8 +212,12 @@ if uploaded_file:
         category_options = sorted(coa_df["GL Account"] + " " + coa_df["Account Name"])
         df["Category"] = df["Category"].astype(str)
 
-        edited_df = st.data_editor(
-            df[["Date", "Description", "Amount", "Vendor", "Category", "Status", "Reason"]],
+        # 🧠 Store editable dataframe in session state
+        if "edited_df" not in st.session_state:
+            st.session_state.edited_df = df[["Date", "Description", "Amount", "Vendor", "Category", "Status", "Reason"]]
+
+        st.session_state.edited_df = st.data_editor(
+            st.session_state.edited_df,
             column_config={
                 "Category": st.column_config.SelectboxColumn("Category", options=category_options, required=False)
             },
@@ -228,7 +227,7 @@ if uploaded_file:
 
         # 💾 Save button
         if st.button("💾 Save Vendor Mappings to Database"):
-            for _, row in edited_df.iterrows():
+            for _, row in st.session_state.edited_df.iterrows():
                 if row["Vendor"] and row["Category"]:
                     vendor = row["Vendor"].strip()
                     vendor_cleaned = vendor.lower()
@@ -246,4 +245,4 @@ if uploaded_file:
                     conn.commit()
             st.success("✅ Vendor mappings saved to database.")
 
-        st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
+        st.download_button("Download CSV", data=st.session_state.edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
