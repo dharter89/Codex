@@ -28,8 +28,9 @@ conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
 
 # Always ensure table exists
+cursor.execute("DROP TABLE IF EXISTS vendor_gl")
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS vendor_gl (
+    CREATE TABLE vendor_gl (
         vendor TEXT,
         corrected_vendor TEXT,
         gl_account TEXT,
@@ -38,6 +39,7 @@ cursor.execute('''
     )
 ''')
 conn.commit()
+
 
 # Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
