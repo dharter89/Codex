@@ -22,7 +22,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Ensure DB folder exists
 os.makedirs("database", exist_ok=True)
 
-# Setup SQLite DB
+# Connect and ensure database/table exists
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''
@@ -36,14 +36,26 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# Load Chart of Accounts
+# Force creation by inserting a dummy row if table is empty
+cursor.execute("SELECT COUNT(*) FROM vendor_gl")
+if cursor.fetchone()[0] == 0:
+    cursor.execute("""
+        INSERT INTO vendor_gl (vendor, corrected_vendor, gl_account, last_used, usage_count)
+        VALUES ('demo', 'Demo Vendor', '1000', ?, 1)
+    """, (datetime.now().strftime('%Y-%m-%d'),))
+    conn.commit()
+
+# Load COA
 COA_PATH = "data/FirmCOAv1.xlsx"
 if not os.path.exists(COA_PATH):
     st.error("Chart of Accounts file is missing.")
     st.stop()
+
 coa_df = pd.read_excel(COA_PATH)
 coa_df.columns = [col.strip() for col in coa_df.columns]
 coa_df = coa_df[['GL Account', 'Account Name', 'Sample Vendors']].dropna()
+coa_df["GL Account"] = coa_df["GL Account"].astype(str)
+coa_df["Account Name"] = coa_df["Account Name"].astype(str)
 
 def gpt_with_retry(client, **kwargs):
     for _ in range(3):
@@ -202,9 +214,6 @@ if uploaded_file:
         progress_bar.empty()
         df = pd.DataFrame(transactions)
 
-        # ✅ Cast and create dropdown for category selection
-        coa_df["GL Account"] = coa_df["GL Account"].astype(str)
-        coa_df["Account Name"] = coa_df["Account Name"].astype(str)
         category_options = sorted(coa_df["GL Account"] + " " + coa_df["Account Name"])
         df["Category"] = df["Category"].astype(str)
 
@@ -217,21 +226,24 @@ if uploaded_file:
             use_container_width=True
         )
 
-        for _, row in edited_df.iterrows():
-            if row["Vendor"] and row["Category"]:
-                vendor = row["Vendor"].strip()
-                vendor_cleaned = vendor.lower()
-                gl = row["Category"]
+        # 💾 Save button
+        if st.button("💾 Save Vendor Mappings to Database"):
+            for _, row in edited_df.iterrows():
+                if row["Vendor"] and row["Category"]:
+                    vendor = row["Vendor"].strip()
+                    vendor_cleaned = vendor.lower()
+                    gl = row["Category"]
 
-                cursor.execute("SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
-                result = cursor.fetchone()
-                usage_count = (result[0] if result else 0) + 1
+                    cursor.execute("SELECT usage_count FROM vendor_gl WHERE corrected_vendor = ?", (vendor_cleaned,))
+                    result = cursor.fetchone()
+                    usage_count = (result[0] if result else 0) + 1
 
-                cursor.execute("""
-                    INSERT OR REPLACE INTO vendor_gl (
-                        vendor, corrected_vendor, gl_account, last_used, usage_count
-                    ) VALUES (?, ?, ?, ?, ?)
-                """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), usage_count))
-                conn.commit()
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO vendor_gl (
+                            vendor, corrected_vendor, gl_account, last_used, usage_count
+                        ) VALUES (?, ?, ?, ?, ?)
+                    """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), usage_count))
+                    conn.commit()
+            st.success("✅ Vendor mappings saved to database.")
 
         st.download_button("Download CSV", data=edited_df.to_csv(index=False), file_name="categorized_transactions.csv", mime="text/csv")
