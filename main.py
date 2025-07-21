@@ -27,7 +27,7 @@ os.makedirs("database", exist_ok=True)
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Always ensure table exists
+# Force recreate vendor_gl table
 cursor.execute("DROP TABLE IF EXISTS vendor_gl")
 cursor.execute('''
     CREATE TABLE vendor_gl (
@@ -39,7 +39,6 @@ cursor.execute('''
     )
 ''')
 conn.commit()
-
 
 # Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
@@ -161,7 +160,7 @@ with st.container():
     st.markdown("Upload PDF statements to categorize transactions.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("📄 Upload Bank Statement (PDF)", type=["pdf"])
+uploaded_file = st.file_uploader("\U0001F4C4 Upload Bank Statement (PDF)", type=["pdf"])
 
 if uploaded_file:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -228,7 +227,7 @@ if uploaded_file:
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
-        st.subheader("🔍 Extracted Transactions")
+        st.subheader("\U0001F50D Extracted Transactions")
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
         for _, row in edited_df.iterrows():
