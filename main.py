@@ -19,12 +19,12 @@ import time
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Setup DB
+# Ensure DB folder exists
 os.makedirs("database", exist_ok=True)
+
+# Setup SQLite DB
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
-
-# Create table if not exists
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS vendor_gl (
         vendor TEXT,
@@ -36,7 +36,7 @@ cursor.execute('''
 ''')
 conn.commit()
 
-# Load COA
+# Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
 if not os.path.exists(COA_PATH):
     st.error("Chart of Accounts file is missing.")
@@ -174,12 +174,12 @@ if uploaded_file:
 
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             for j, line in enumerate(lines):
-                date_match = re.match(r'(\\d{2}/\\d{2})\\s+', line)
+                date_match = re.match(r'(\d{2}/\d{2})\s+', line)
                 if date_match:
                     full_line = line
                     if j + 1 < len(lines):
                         full_line += " " + lines[j + 1]
-                    match = re.match(r'(\\d{2}/\\d{2})[^\\d]*(.*?)\\s+([-+]?\\$?\\d+[,.]\\d{2})', full_line)
+                    match = re.match(r'(\d{2}/\d{2})[^\d]*(.*?)\s+([-+]?\$?\d+[,.]\d{2})', full_line)
                     if match:
                         date_raw, description, amount_str = match.groups()
                         try:
@@ -202,8 +202,10 @@ if uploaded_file:
         progress_bar.empty()
         df = pd.DataFrame(transactions)
 
-        # 🧠 Category dropdown support
-        category_options = sorted(coa_df["GL Account"].astype(str) + " " + coa_df["Account Name"])
+        # ✅ Cast and create dropdown for category selection
+        coa_df["GL Account"] = coa_df["GL Account"].astype(str)
+        coa_df["Account Name"] = coa_df["Account Name"].astype(str)
+        category_options = sorted(coa_df["GL Account"] + " " + coa_df["Account Name"])
         df["Category"] = df["Category"].astype(str)
 
         edited_df = st.data_editor(
