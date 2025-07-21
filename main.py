@@ -27,21 +27,17 @@ os.makedirs("database", exist_ok=True)
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Recreate vendor_gl table if corrupted or missing
-try:
-    cursor.execute("SELECT 1 FROM vendor_gl LIMIT 1")
-except sqlite3.OperationalError:
-    cursor.execute("DROP TABLE IF EXISTS vendor_gl")
-    cursor.execute('''
-        CREATE TABLE vendor_gl (
-            vendor TEXT,
-            corrected_vendor TEXT,
-            gl_account TEXT,
-            last_used TEXT,
-            usage_count INTEGER
-        )
-    ''')
-    conn.commit()
+# Always ensure table exists
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS vendor_gl (
+        vendor TEXT,
+        corrected_vendor TEXT,
+        gl_account TEXT,
+        last_used TEXT,
+        usage_count INTEGER
+    )
+''')
+conn.commit()
 
 # Load Chart of Accounts
 COA_PATH = "data/FirmCOAv1.xlsx"
@@ -163,7 +159,7 @@ with st.container():
     st.markdown("Upload PDF statements to categorize transactions.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("\U0001F4C4 Upload Bank Statement (PDF)", type=["pdf"])
+uploaded_file = st.file_uploader("📄 Upload Bank Statement (PDF)", type=["pdf"])
 
 if uploaded_file:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -230,7 +226,7 @@ if uploaded_file:
 
         progress_bar.empty()
         df = pd.DataFrame(transactions)
-        st.subheader("\U0001F50D Extracted Transactions")
+        st.subheader("🔍 Extracted Transactions")
         edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
         for _, row in edited_df.iterrows():
