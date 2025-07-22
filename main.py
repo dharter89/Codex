@@ -22,23 +22,20 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Ensure DB folder exists
 os.makedirs("database", exist_ok=True)
 
-# Connect and ensure database/table exists
+# Connect to database
 conn = sqlite3.connect("database/vendor_gl.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS vendor_gl (
         vendor TEXT,
-        corrected_vendor TEXT,
+        corrected_vendor TEXT PRIMARY KEY,
         gl_account TEXT,
         last_used TEXT,
-        usage_count INTEGER
+        usage_count INTEGER,
+        confidence REAL DEFAULT 1.0
     )
 ''')
 conn.commit()
-
-# Debug output to confirm path and DB existence
-st.write("📂 Working directory:", os.getcwd())
-st.write("📄 DB exists:", os.path.exists("database/vendor_gl.db"))
 
 # Load COA
 COA_PATH = "data/FirmCOAv1.xlsx"
@@ -53,11 +50,11 @@ coa_df["GL Account"] = coa_df["GL Account"].astype(str)
 coa_df["Account Name"] = coa_df["Account Name"].astype(str)
 
 def gpt_with_retry(client, **kwargs):
-    for _ in range(3):
+    for attempt in range(3):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as e:
-            print("[GPT retry] Error:", e)
+            print(f"[GPT retry {attempt}] Error:", e)
             time.sleep(2)
     return None
 
@@ -96,16 +93,17 @@ def match_category(vendor, coa_df, cursor):
             result = json.loads(response.choices[0].message.content.strip())
             gl = result.get("gl_account")
             conf = result.get("confidence", 0)
-            if conf >= 0.9:
-                cursor.execute("INSERT INTO vendor_gl VALUES (?, ?, ?, ?, ?)",
-                               (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), 1))
+            if gl and conf >= 0.8:
+                cursor.execute("INSERT OR REPLACE INTO vendor_gl VALUES (?, ?, ?, ?, ?, ?)",
+                               (vendor, vendor_cleaned, gl, datetime.now().strftime('%Y-%m-%d'), 1, conf))
                 conn.commit()
                 return gl
     except Exception as e:
         print("[GPT Match Error]:", e)
 
     for _, row in coa_df.iterrows():
-        if str(row["Sample Vendors"]).lower() in vendor_cleaned:
+        sample = str(row["Sample Vendors"]).lower()
+        if sample and sample in vendor_cleaned:
             return row["GL Account"]
 
     return None
@@ -145,7 +143,8 @@ def extract_text_from_image(image):
 st.set_page_config(page_title="Bank Statement Categorizer", layout="centered")
 
 with st.container():
-    st.image("data/ValiantIconWhite.png", width=250)
+    if os.path.exists("data/ValiantIconWhite.png"):
+        st.image("data/ValiantIconWhite.png", width=250)
     st.title("Bank Statement Categorizer")
     st.markdown("Upload PDF statements to categorize transactions.")
 
@@ -212,7 +211,6 @@ if uploaded_file:
         category_options = sorted(coa_df["GL Account"] + " " + coa_df["Account Name"])
         df["Category"] = df["Category"].astype(str)
 
-        # 🧠 Store editable dataframe in session state
         if "edited_df" not in st.session_state:
             st.session_state.edited_df = df[["Date", "Description", "Amount", "Vendor", "Category", "Status", "Reason"]]
 
@@ -225,7 +223,6 @@ if uploaded_file:
             use_container_width=True
         )
 
-        # 💾 Save button
         if st.button("💾 Save Vendor Mappings to Database"):
             for _, row in st.session_state.edited_df.iterrows():
                 if row["Vendor"] and row["Category"]:
@@ -239,9 +236,9 @@ if uploaded_file:
 
                     cursor.execute("""
                         INSERT OR REPLACE INTO vendor_gl (
-                            vendor, corrected_vendor, gl_account, last_used, usage_count
-                        ) VALUES (?, ?, ?, ?, ?)
-                    """, (vendor_cleaned, vendor, gl, datetime.now().strftime('%Y-%m-%d'), usage_count))
+                            vendor, corrected_vendor, gl_account, last_used, usage_count, confidence
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                    """, (vendor, vendor_cleaned, gl, datetime.now().strftime('%Y-%m-%d'), usage_count, 1.0))
                     conn.commit()
             st.success("✅ Vendor mappings saved to database.")
 
